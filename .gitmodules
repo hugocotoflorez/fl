@@ -1,0 +1,6 @@
+[submodule "flag"]
+	path = flag
+	url = https://github.com/hugocotoflorez/flag
+[submodule "frog"]
+	path = frog
+	url = https://github.com/hugocotoflorez/frog
