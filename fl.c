@@ -1,6 +1,7 @@
 #include <assert.h>
 #include <dirent.h>
 #include <errno.h>
+#include <linux/limits.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -15,6 +16,7 @@
 /* If defined and set to !=0, it would open files using xdg-open.
  * Otherwise, it would open it with $EDITOR in current terminal. */
 #define USE_XDG_OPEN 0
+static int open_as_external = 0;
 
 /* Colors for specific entry types. "" is set to default */
 static const char *COLORS[] = {
@@ -85,75 +87,102 @@ report(const char *restrict format, ...)
         fclose(file);
 }
 
+int
+sort_cmp(const void *_a, const void *_b)
+{
+        struct extend_dirent *a = (struct extend_dirent *) _a;
+        struct extend_dirent *b = (struct extend_dirent *) _b;
+
+        char *fullname_a = strdup(a->path);
+        fullname_a = realloc(fullname_a, strlen(a->dirent.d_name) + 1);
+        strcat(fullname_a, "/");
+        strcat(fullname_a, a->dirent.d_name);
+
+        char *fullname_b = strdup(b->path);
+        fullname_b = realloc(fullname_b, strlen(b->dirent.d_name) + 1);
+        strcat(fullname_b, "/");
+        strcat(fullname_b, b->dirent.d_name);
+
+        int result = strcmp(fullname_a, fullname_b);
+
+        free(fullname_a);
+        free(fullname_b);
+
+        return result;
+}
+
+void
+sort()
+{
+        qsort(dir_arr.data, dir_arr.size, sizeof *dir_arr.data, sort_cmp);
+}
+
 #define amalloc(size) ({ __auto_type _ptr_ = malloc(size); assert(_ptr_); _ptr_; })
 
-#if defined(USE_XDG_OPEN) && USE_XDG_OPEN
 void
 edit_file(const char *path, const char *subpath)
 {
         char *p = strdup(path);
-        switch (fork()) {
-        case -1:
-                report("Fork failed");
-                return;
-        case 0:
-                if (subpath) {
-                        p = amalloc(strlen(path) + strlen(subpath) + 2);
-                        *p = 0;
-                        strcat(p, subpath);
-                        strcat(p, "/");
-                        strcat(p, path);
-                }
-                execvp("xdg-open", (char *const[]) { "xdg-open", p, NULL });
-                report("Execv failed: %s. At:", strerror(errno));
-                report("execv(\"xdg-open\", (char *const[]) { \"xdg-open\", %s, NULL });", p);
-                free(p);
+        if (!p) {
+                report("Critical error: can not alloc memory");
                 abort();
-        default:
-                return;
         }
-}
 
-#else
-void
-edit_file(const char *path, const char *subpath)
-{
-        char *p = strdup(path);
-        int child;
-        disable_custom_mode();
-
-        switch (child = fork()) {
-        case -1:
-                report("Fork failed");
-                return;
-
-        case 0:
-                if (subpath) {
-                        p = amalloc(strlen(path) + strlen(subpath) + 2);
-                        *p = 0;
-                        strcat(p, subpath);
-                        strcat(p, "/");
-                        strcat(p, path);
-                }
-                char *editor = getenv("EDITOR");
-                if (editor == NULL) {
-                        report("Can not find env `EDITOR`");
+        if (open_as_external) {
+                switch (fork()) {
+                case -1:
+                        report("Fork failed");
+                        return;
+                case 0:
+                        if (subpath) {
+                                p = amalloc(strlen(path) + strlen(subpath) + 2);
+                                *p = 0;
+                                strcat(p, subpath);
+                                strcat(p, "/");
+                                strcat(p, path);
+                        }
+                        execvp("xdg-open", (char *const[]) { "xdg-open", p, NULL });
+                        report("Execv failed: %s. At:", strerror(errno));
+                        report("execv(\"xdg-open\", (char *const[]) { \"xdg-open\", %s, NULL });", p);
+                        free(p);
                         abort();
                 }
-                execvp(editor, (char *const[]) { editor, p, NULL });
-                report("Execv failed: %s. At:", strerror(errno));
-                report("execv(%s, (char *const[]) { %s, %s, NULL });", editor, p, editor);
-                free(p);
-                abort();
 
-        default:
-                waitpid(child, NULL, 0);
-                report("Waiting for %d complete", child);
-                break;
+        } else {
+                int child;
+                disable_custom_mode();
+
+                switch (child = fork()) {
+                case -1:
+                        report("Fork failed");
+                        return;
+
+                case 0:
+                        if (subpath) {
+                                p = amalloc(strlen(path) + strlen(subpath) + 2);
+                                *p = 0;
+                                strcat(p, subpath);
+                                strcat(p, "/");
+                                strcat(p, path);
+                        }
+                        char *editor = getenv("EDITOR");
+                        if (editor == NULL) {
+                                report("Can not find env `EDITOR`");
+                                abort();
+                        }
+                        execvp(editor, (char *const[]) { editor, p, NULL });
+                        report("Execv failed: %s. At:", strerror(errno));
+                        report("execv(%s, (char *const[]) { %s, %s, NULL });", editor, p, editor);
+                        free(p);
+                        abort();
+
+                default:
+                        waitpid(child, NULL, 0);
+                        break;
+                }
+                enable_custom_mode();
         }
-        enable_custom_mode();
 }
-#endif
 
 /* Add path from subpath path, at list index at. subpath can be null if using
  * current dir, and at can be -1 to append it. */
@@ -187,6 +216,7 @@ add_subfolder(const char *path, const char *subpath, int at)
                 da_insert(&dir_arr, edirent, at);
         }
         free(p);
+        sort();
 }
 
 void
@@ -346,9 +376,14 @@ mainloop()
 
                         print_files();
                         break;
+
+                case 's':
+                        sort();
+                        print_files();
+
                 default:
                         print_files();
-                        report("Pressed char: %d", action);
+                        report("Pressed unused char: %d", action);
                         break;
                 }
         }
@@ -359,21 +394,19 @@ mainloop()
 int
 main(int argc, char *argv[])
 {
-        int iteractive = 1;
         int i;
 
         flag_set(&argc, &argv);
-        if (flag_get("-I", "--no-iteractive")) iteractive = 0;
+
+        /* This is totally useless */
+        if (flag_get("-E", "--external")) open_as_external = 1;
 
         for (i = 1; i < argc; i++)
                 add_subfolder(argv[i], NULL, -1);
 
         if (argc == 1) add_subfolder(".", NULL, -1);
 
-        if (iteractive)
-                mainloop();
-        else
-                print_files();
+        mainloop();
 
         return 0;
 }
