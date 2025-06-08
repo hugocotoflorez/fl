@@ -33,10 +33,13 @@ report(const char *restrict format, ...)
 #define amalloc(size) ({ __auto_type _ptr_ = malloc(size); assert(_ptr_); _ptr_; })
 
 void
-add_subfolder(const char *path, const char *subpath)
+add_subfolder(const char *path, const char *subpath, int at)
 {
         struct dirent *entry;
         struct extend_dirent edirent;
+
+        if (at < 0 || at > dir_arr.size)
+                at = dir_arr.size;
 
         char *p = (char *) path;
         if (subpath) {
@@ -55,7 +58,7 @@ add_subfolder(const char *path, const char *subpath)
         while ((entry = readdir(dir))) {
                 edirent.dirent = *entry;
                 strcpy(edirent.path, p);
-                da_append(&dir_arr, edirent);
+                da_insert(&dir_arr, edirent, at);
         }
 }
 
@@ -226,7 +229,7 @@ mainloop()
 
                         else
                                 add_subfolder(dir_arr.data[selected_row].dirent.d_name,
-                                              dir_arr.data[selected_row].path);
+                                              dir_arr.data[selected_row].path, selected_row+1);
 
                         print_files();
                         break;
@@ -252,9 +255,9 @@ main(int argc, char *argv[])
         if (flag_get("-I", "--no-iteractive")) iteractive = 0;
 
         for (i = 1; i < argc; i++)
-                add_subfolder(argv[i], NULL);
+                add_subfolder(argv[i], NULL, -1);
 
-        if (argc == 1) add_subfolder(".", NULL);
+        if (argc == 1) add_subfolder(".", NULL, -1);
 
         if (iteractive)
                 mainloop();
