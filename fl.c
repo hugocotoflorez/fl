@@ -3,12 +3,30 @@
 #include <errno.h>
 #include <stdarg.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <sys/wait.h>
 #include <termios.h>
 #include <unistd.h>
 
 #include "flag/flag.h"
 #include "frog/frog.h"
+
+/* If defined and set to !=0, it would open files using xdg-open.
+ * Otherwise, it would open it with $EDITOR in current terminal. */
+#define USE_XDG_OPEN 0
+
+/* Colors for specific entry types. "" is set to default */
+static const char *COLORS[] = {
+        [DT_BLK] = "", // This is a block device.
+        [DT_CHR] = "", // This is a character device.
+        [DT_DIR] = "\e[34m", // This is a directory.
+        [DT_FIFO] = "", // This is a named pipe (FIFO).
+        [DT_LNK] = "\e[36m", // This is a symbolic link.
+        [DT_REG] = "", // This is a regular file.
+        [DT_SOCK] = "", // This is a UNIX domain socket.
+        [DT_UNKNOWN] = "", // The file type could not be determined.
+};
 
 
 struct extend_dirent {
@@ -20,28 +38,132 @@ typedef DA(struct extend_dirent) dirent_da;
 dirent_da dir_arr;
 int selected_row = 0;
 
+struct termios origin_termios;
+
+void
+enable_raw_mode()
+{
+        struct termios raw_opts;
+        tcgetattr(STDIN_FILENO, &origin_termios);
+        raw_opts = origin_termios;
+        cfmakeraw(&raw_opts);
+        raw_opts.c_oflag |= (OPOST | ONLCR); // '\n' -> '\r\n'
+        tcsetattr(STDIN_FILENO, TCSANOW, &raw_opts);
+}
+
+void
+disable_raw_mode()
+{
+        tcsetattr(STDIN_FILENO, TCSANOW, &origin_termios);
+}
+
+/* If this is defined as a function, the alternative buffer does not work.
+ * So, it is defined as a macro :/ */
+#define disable_custom_mode()                                         \
+        {                                                             \
+                /* disable alternative buffer */ printf("\e[?1049l"); \
+                /* make cursor visible        */ printf("\e[?25h");   \
+                disable_raw_mode();                                   \
+        }
+
+#define enable_custom_mode()                                          \
+        {                                                             \
+                enable_raw_mode();                                    \
+                /* make cursor invisible      */ printf("\e[?25l");   \
+                /* enable alternative buffer  */ printf("\e[?1049h"); \
+                /* clear screen               */ printf("\e[H\e[2J"); \
+        }
 
 void
 report(const char *restrict format, ...)
 {
+        FILE *file = fopen("log.txt", "a");
         va_list ap;
         va_start(ap, format);
-        printf("\e[H");
-        vprintf(format, ap);
+        vfprintf(file, format, ap);
+        fprintf(file, "\n");
+        fclose(file);
 }
 
 #define amalloc(size) ({ __auto_type _ptr_ = malloc(size); assert(_ptr_); _ptr_; })
 
+#if defined(USE_XDG_OPEN) && USE_XDG_OPEN
+void
+edit_file(const char *path, const char *subpath)
+{
+        char *p = strdup(path);
+        switch (fork()) {
+        case -1:
+                report("Fork failed");
+                return;
+        case 0:
+                if (subpath) {
+                        p = amalloc(strlen(path) + strlen(subpath) + 2);
+                        *p = 0;
+                        strcat(p, subpath);
+                        strcat(p, "/");
+                        strcat(p, path);
+                }
+                execvp("xdg-open", (char *const[]) { "xdg-open", p, NULL });
+                report("Execv failed: %s. At:", strerror(errno));
+                report("execv(\"xdg-open\", (char *const[]) { \"xdg-open\", %s, NULL });", p);
+                free(p);
+                abort();
+        default:
+                return;
+        }
+}
+
+#else
+void
+edit_file(const char *path, const char *subpath)
+{
+        char *p = strdup(path);
+        int child;
+        disable_custom_mode();
+
+        switch (child = fork()) {
+        case -1:
+                report("Fork failed");
+                return;
+
+        case 0:
+                if (subpath) {
+                        p = amalloc(strlen(path) + strlen(subpath) + 2);
+                        *p = 0;
+                        strcat(p, subpath);
+                        strcat(p, "/");
+                        strcat(p, path);
+                }
+                char *editor = getenv("EDITOR");
+                if (editor == NULL) {
+                        report("Can not find env `EDITOR`");
+                        abort();
+                }
+                execvp(editor, (char *const[]) { editor, p, NULL });
+                report("Execv failed: %s. At:", strerror(errno));
+                report("execv(%s, (char *const[]) { %s, %s, NULL });", editor, p, editor);
+                free(p);
+                abort();
+
+        default:
+                waitpid(child, NULL, 0);
+                report("Waiting for %d complete", child);
+                break;
+        }
+        enable_custom_mode();
+}
+#endif
+
+/* Add path from subpath path, at list index at. subpath can be null if using
+ * current dir, and at can be -1 to append it. */
 void
 add_subfolder(const char *path, const char *subpath, int at)
 {
         struct dirent *entry;
         struct extend_dirent edirent;
+        char *p = strdup(path);
 
-        if (at < 0 || at > dir_arr.size)
-                at = dir_arr.size;
-
-        char *p = (char *) path;
         if (subpath) {
                 p = amalloc(strlen(path) + strlen(subpath) + 2);
                 *p = 0;
@@ -49,24 +171,29 @@ add_subfolder(const char *path, const char *subpath, int at)
                 strcat(p, "/");
                 strcat(p, path);
         }
+
         DIR *dir = opendir(p);
         if (!dir) {
                 report("Can not open dir: %s", path);
                 return;
         }
 
+        if (at < 0 || at > dir_arr.size) at = dir_arr.size;
+
         while ((entry = readdir(dir))) {
+                if (!strcmp(entry->d_name, ".")) continue; // do not add "." to files
                 edirent.dirent = *entry;
                 strcpy(edirent.path, p);
                 da_insert(&dir_arr, edirent, at);
         }
+        free(p);
 }
 
 void
 remove_subfolder(const char *path, const char *subpath)
 {
         int i;
-        char *p = (char *) path;
+        char *p = strdup(path);
         if (subpath) {
                 p = amalloc(strlen(path) + strlen(subpath) + 2);
                 *p = 0;
@@ -80,12 +207,13 @@ remove_subfolder(const char *path, const char *subpath)
                         --i;
                 }
         }
+        free(p);
 }
 
 int
 is_folder_open(const char *path, const char *subpath)
 {
-        char *p = (char *) path;
+        char *p = strdup(path);
         if (subpath) {
                 p = amalloc(strlen(path) + strlen(subpath) + 2);
                 *p = 0;
@@ -99,15 +227,17 @@ is_folder_open(const char *path, const char *subpath)
                         return 1;
                 }
         }
+        free(p);
         return 0;
 }
 
 void
 print_file(struct extend_dirent entry)
 {
-        if (strcmp(entry.path, "."))
-                printf("[%s/]", entry.path);
-        printf("%s\n", entry.dirent.d_name);
+        char *path = entry.path;
+        if (!memcmp(path, "./", 2)) path += 2; // remove the ugly ./ prefix
+        if (strcmp(path, ".")) printf("%s/", path);
+        printf("%s%s\e[0m\n", COLORS[entry.dirent.d_type], entry.dirent.d_name);
 }
 
 void
@@ -118,9 +248,8 @@ print_files()
         printf("\e[2J\e[H");
         for (i = 0; i < dir_arr.size; i++) {
                 if (i == selected_row) {
-                        printf("\e[%d;%dm", 30, 44);
+                        printf("\e[7m");
                         print_file(dir_arr.data[i]);
-                        printf("\e[0m");
                 } else
                         print_file(dir_arr.data[i]);
         }
@@ -139,24 +268,6 @@ getkey()
         default:
                 return c;
         }
-}
-
-struct termios origin_termios;
-void
-enable_raw_mode()
-{
-        struct termios raw_opts;
-        tcgetattr(STDIN_FILENO, &origin_termios);
-        raw_opts = origin_termios;
-        cfmakeraw(&raw_opts);
-        raw_opts.c_oflag |= (OPOST | ONLCR); // '\n' -> '\r\n'
-        tcsetattr(STDIN_FILENO, TCSANOW, &raw_opts);
-}
-
-void
-disable_raw_mode()
-{
-        tcsetattr(STDIN_FILENO, TCSANOW, &origin_termios);
 }
 
 int
@@ -178,10 +289,7 @@ mainloop()
         int action;
         int quit = 0;
         struct extend_dirent temp;
-        enable_raw_mode();
-        printf("\e[?25l"); // make cursor invisible
-        printf("\e[?1049h"); // enable alternative buffer
-        printf("\e[H\e[2J"); // clear screen
+        enable_custom_mode();
 
         print_files();
         while (!quit) {
@@ -192,6 +300,7 @@ mainloop()
                 case 0x3: /* C-c */
                         quit = 1;
                         break;
+
                 case 'k':
                         if (!selected_row--)
                                 selected_row = 0;
@@ -222,14 +331,18 @@ mainloop()
 
                 case 13:
                 case '\b': // backspace
-                        if (!is_folder(dir_arr.data[selected_row].dirent)) break;
+                        if (!is_folder(dir_arr.data[selected_row].dirent)) {
+                                edit_file(dir_arr.data[selected_row].dirent.d_name, dir_arr.data[selected_row].path);
+                        }
 
-                        if (is_folder_open(dir_arr.data[selected_row].dirent.d_name, dir_arr.data[selected_row].path))
-                                remove_subfolder(dir_arr.data[selected_row].dirent.d_name, dir_arr.data[selected_row].path);
-
+                        else if (is_folder_open(dir_arr.data[selected_row].dirent.d_name,
+                                                dir_arr.data[selected_row].path))
+                                remove_subfolder(dir_arr.data[selected_row].dirent.d_name,
+                                                 dir_arr.data[selected_row].path);
                         else
                                 add_subfolder(dir_arr.data[selected_row].dirent.d_name,
-                                              dir_arr.data[selected_row].path, selected_row+1);
+                                              dir_arr.data[selected_row].path, selected_row + 1);
+
 
                         print_files();
                         break;
@@ -240,9 +353,7 @@ mainloop()
                 }
         }
 
-        printf("\e[?1049l");
-        printf("\e[?25h");
-        disable_raw_mode();
+        disable_custom_mode();
 }
 
 int
