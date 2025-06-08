@@ -5,12 +5,12 @@
 2. Execute it: `./fl [OPTIONS]`
 
 ### OPTIONS
--E  --external: Open files using xdg-open instead of `$EDITOR`.
+-E,  --external: Open files using xdg-open instead of `$EDITOR`.
 
 ## KEYBINDS
 
 - `k`, `j`: Move selector up and down.
-- `K`, `J`: Move selected line up and down.
+- `K`, `J`: Move selected entry up and down. (Useless for now).
 - `Enter`: Expand folder or open file. Links are not supported (UB).
 
 ## REFERENCES
