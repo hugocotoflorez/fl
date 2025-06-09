@@ -1,11 +1,15 @@
 #include <assert.h>
 #include <dirent.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <linux/limits.h>
+#include <regex.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <sys/types.h>
 #include <sys/wait.h>
 #include <termios.h>
 #include <unistd.h>
@@ -13,10 +17,10 @@
 #include "flag/flag.h"
 #include "frog/frog.h"
 
-/* If defined and set to !=0, it would open files using xdg-open.
- * Otherwise, it would open it with $EDITOR in current terminal. */
-#define USE_XDG_OPEN 0
+#define UNDO_BACKUP_DIR "/tmp/fl-backup"
+
 static int open_as_external = 0;
+static int do_not_delete = 0;
 
 /* Colors for specific entry types. "" is set to default */
 static const char *COLORS[] = {
@@ -37,10 +41,27 @@ struct extend_dirent {
 };
 
 typedef DA(struct extend_dirent) dirent_da;
-dirent_da dir_arr;
+dirent_da dir_arr = { 0 };
+dirent_da deleted_dir_arr = { 0 };
 int selected_row = 0;
 
 struct termios origin_termios;
+
+char *
+__strconcat(const char *s1, ...)
+{
+        va_list ap;
+        char *result = strdup(s1);
+        char *current;
+        va_start(ap, s1);
+        while ((current = va_arg(ap, char *))) {
+                result = realloc(result, strlen(current));
+                assert(result);
+                strcat(result, current);
+        }
+        return result;
+}
+#define strconcat(s1, ...) __strconcat(s1, ##__VA_ARGS__, NULL)
 
 void
 enable_raw_mode()
@@ -76,6 +97,9 @@ disable_raw_mode()
                 /* clear screen               */ printf("\e[H\e[2J"); \
         }
 
+/* Coments in the code above are written before the actual code to be able to
+ * use it inside the macro, don't judge me, please. */
+
 void
 report(const char *restrict format, ...)
 {
@@ -93,15 +117,8 @@ sort_cmp(const void *_a, const void *_b)
         struct extend_dirent *a = (struct extend_dirent *) _a;
         struct extend_dirent *b = (struct extend_dirent *) _b;
 
-        char *fullname_a = strdup(a->path);
-        fullname_a = realloc(fullname_a, strlen(a->dirent.d_name) + 1);
-        strcat(fullname_a, "/");
-        strcat(fullname_a, a->dirent.d_name);
-
-        char *fullname_b = strdup(b->path);
-        fullname_b = realloc(fullname_b, strlen(b->dirent.d_name) + 1);
-        strcat(fullname_b, "/");
-        strcat(fullname_b, b->dirent.d_name);
+        char *fullname_a = strconcat(a->path, "/", a->dirent.d_name);
+        char *fullname_b = strconcat(b->path, "/", b->dirent.d_name);
 
         int result = strcmp(fullname_a, fullname_b);
 
@@ -134,13 +151,7 @@ edit_file(const char *path, const char *subpath)
                         report("Fork failed");
                         return;
                 case 0:
-                        if (subpath) {
-                                p = amalloc(strlen(path) + strlen(subpath) + 2);
-                                *p = 0;
-                                strcat(p, subpath);
-                                strcat(p, "/");
-                                strcat(p, path);
-                        }
+                        if (subpath) p = strconcat(subpath, "/", path);
                         execvp("xdg-open", (char *const[]) { "xdg-open", p, NULL });
                         report("Execv failed: %s. At:", strerror(errno));
                         report("execv(\"xdg-open\", (char *const[]) { \"xdg-open\", %s, NULL });", p);
@@ -158,13 +169,7 @@ edit_file(const char *path, const char *subpath)
                         return;
 
                 case 0:
-                        if (subpath) {
-                                p = amalloc(strlen(path) + strlen(subpath) + 2);
-                                *p = 0;
-                                strcat(p, subpath);
-                                strcat(p, "/");
-                                strcat(p, path);
-                        }
+                        if (subpath) p = strconcat(subpath, "/", path);
                         char *editor = getenv("EDITOR");
                         if (editor == NULL) {
                                 report("Can not find env `EDITOR`");
@@ -191,15 +196,12 @@ add_subfolder(const char *path, const char *subpath, int at)
 {
         struct dirent *entry;
         struct extend_dirent edirent;
-        char *p = strdup(path);
+        char *p;
 
-        if (subpath) {
-                p = amalloc(strlen(path) + strlen(subpath) + 2);
-                *p = 0;
-                strcat(p, subpath);
-                strcat(p, "/");
-                strcat(p, path);
-        }
+        if (subpath)
+                p = strconcat(subpath, "/", path);
+        else
+                p = strdup(path);
 
         DIR *dir = opendir(p);
         if (!dir) {
@@ -223,14 +225,12 @@ void
 remove_subfolder(const char *path, const char *subpath)
 {
         int i;
-        char *p = strdup(path);
-        if (subpath) {
-                p = amalloc(strlen(path) + strlen(subpath) + 2);
-                *p = 0;
-                strcat(p, subpath);
-                strcat(p, "/");
-                strcat(p, path);
-        }
+        char *p;
+
+        if (subpath)
+                p = strconcat(subpath, "/", path);
+        else
+                p = strdup(path);
         for (i = 0; i < dir_arr.size; i++) {
                 if (!memcmp(p, dir_arr.data[i].path, strlen(p))) {
                         da_remove(&dir_arr, i);
@@ -243,14 +243,12 @@ remove_subfolder(const char *path, const char *subpath)
 int
 is_folder_open(const char *path, const char *subpath)
 {
-        char *p = strdup(path);
-        if (subpath) {
-                p = amalloc(strlen(path) + strlen(subpath) + 2);
-                *p = 0;
-                strcat(p, subpath);
-                strcat(p, "/");
-                strcat(p, path);
-        }
+        char *p;
+
+        if (subpath)
+                p = strconcat(subpath, "/", path);
+        else
+                p = strdup(path);
         int i;
         for (i = 0; i < dir_arr.size; i++) {
                 if (!memcmp(p, dir_arr.data[i].path, strlen(p))) {
@@ -271,10 +269,10 @@ print_file(struct extend_dirent entry)
 }
 
 void
-print_files()
+refresh()
 {
         int i;
-        /* Erase screen and place cursor at top left corner */
+        /* Erase screen and place cursor at the top left corner */
         printf("\e[2J\e[H");
         for (i = 0; i < dir_arr.size; i++) {
                 if (i == selected_row) {
@@ -313,15 +311,143 @@ is_folder(struct dirent entry)
         }
 }
 
+/* TODO: this is ugly as fuck. Noodle code :) */
+int
+create_filename_path_if_not_exists(const char *filename)
+{
+        char *f = strdup(filename);
+        char *c = f;
+        /* TODO: remove ff as it is not clear at all. But it works fine */
+        char *ff = f; // start of current dir being analized (just one)
+        struct stat buf;
+        while ((c = strchr(c, '/'))) {
+                *c = 0;
+                if (stat(f, &buf) == -1)
+                        ; // check that dir does not exist
+                else if (*f != 0 && strcmp(".", ff) && mkdir(f, 0700)) {
+                        report("Can't mkdir `%s`: %s", f, strerror(errno));
+                        goto __error_exit;
+                }
+                *c = '/';
+                c++;
+                ff = c;
+        }
+
+        /* I dont like this. TODO: refactoring */
+        free(f);
+        return 0;
+__error_exit:
+        free(f);
+        return -1;
+}
+
+
+int
+store_remove(const char *filename)
+{
+        char buffer[1024 * 1024];
+        int fd_in, fd_out;
+        char *backup_filename;
+        ssize_t n;
+
+        backup_filename = strconcat(UNDO_BACKUP_DIR, "/", filename);
+        if (create_filename_path_if_not_exists(backup_filename)) {
+                report("Can not create path for file: `%s`: %s", backup_filename, strerror(errno));
+                goto __error_exit;
+        }
+
+        fd_out = open(backup_filename, O_CREAT | O_WRONLY, 0600);
+        /* Todo: use prev permissions */
+        if (fd_out < 0) {
+                report("Can not create file: `%s`: %s", backup_filename, strerror(errno));
+                goto __error_exit;
+        }
+
+        fd_in = open(filename, O_RDONLY, 0600);
+        /* Todo: use prev permissions */
+        if (fd_in < 0) {
+                report("Can not open file: `%s`: %s", filename, strerror(errno));
+                goto __error_exit;
+        }
+
+        while ((n = read(fd_in, buffer, sizeof buffer)))
+                if (write(fd_out, buffer, n) != n) {
+                        report("Error writing file: `%s`: %s", filename, strerror(errno));
+                        goto __error_exit;
+                }
+
+        if (n < 0) {
+                report("Error reading file: `%s`: %s", backup_filename, strerror(errno));
+                goto __error_exit;
+        }
+
+        if (remove(filename)) {
+                report("Can't remove `%s`: %s", filename, strerror(errno));
+                goto __error_exit;
+        }
+
+        /* I dont like how the following code looks like. TODO: refactoring */
+        free(backup_filename);
+        return 0;
+__error_exit:
+        free(backup_filename);
+        return -1;
+}
+
+int
+restore(const char *filename)
+{
+        char buffer[1024 * 1024];
+        int fd_in, fd_out;
+        char *backup_filename;
+        ssize_t n;
+
+        fd_out = open(filename, O_CREAT | O_WRONLY, 0600);
+        /* Todo: use prev permissions */
+        if (fd_out < 0) {
+                report("Can not create file: `%s`\n", filename);
+                goto __error_exit;
+        }
+
+        backup_filename = strconcat(UNDO_BACKUP_DIR, "/", filename);
+        fd_in = open(backup_filename, O_RDONLY, 0600);
+        /* Todo: use prev permissions */
+        if (fd_in < 0) {
+                report("Can not open file: `%s`\n", backup_filename);
+                goto __error_exit;
+        }
+
+        while ((n = read(fd_in, buffer, sizeof buffer)))
+                if (write(fd_out, buffer, n) != n) {
+                        report("Error writing file: `%s`: %s", filename, strerror(errno));
+                        goto __error_exit;
+                }
+
+        if (n < 0) {
+                report("Error reading file: `%s`: %s", backup_filename, strerror(errno));
+                goto __error_exit;
+        }
+
+        /* I dont like how the following code looks like. TODO: refactoring */
+        free(backup_filename);
+        return 0;
+__error_exit:
+        free(backup_filename);
+        return -1;
+}
+
+
 void
 mainloop()
 {
         int action;
         int quit = 0;
+        char *filename;
         struct extend_dirent temp;
-        enable_custom_mode();
 
-        print_files();
+        enable_custom_mode();
+        refresh();
+
         while (!quit) {
                 action = getkey();
 
@@ -334,12 +460,12 @@ mainloop()
                 case 'k':
                         if (!selected_row--)
                                 selected_row = 0;
-                        print_files();
+                        refresh();
                         break;
                 case 'j':
                         if (++selected_row >= dir_arr.size)
                                 selected_row--;
-                        print_files();
+                        refresh();
                         break;
 
                 case 'K':
@@ -348,7 +474,7 @@ mainloop()
                         dir_arr.data[selected_row] = dir_arr.data[selected_row - 1];
                         dir_arr.data[selected_row - 1] = temp;
                         --selected_row;
-                        print_files();
+                        refresh();
                         break;
                 case 'J':
                         if (selected_row >= dir_arr.size - 1) break;
@@ -356,8 +482,34 @@ mainloop()
                         dir_arr.data[selected_row] = dir_arr.data[selected_row + 1];
                         dir_arr.data[selected_row + 1] = temp;
                         ++selected_row;
-                        print_files();
+                        refresh();
                         break;
+
+                case 'd':
+                        if (do_not_delete) break;
+                        temp = dir_arr.data[selected_row];
+                        filename = strconcat(temp.path, "/", temp.dirent.d_name);
+                        if (store_remove(filename)) {
+                                break;
+                        }
+                        da_append(&deleted_dir_arr, temp);
+                        da_remove(&dir_arr, selected_row);
+                        free(filename);
+                        if (selected_row == dir_arr.size) --selected_row;
+                        refresh();
+                        break;
+
+                case 'u':
+                        if (deleted_dir_arr.size == 0) break;
+                        temp = deleted_dir_arr.data[--deleted_dir_arr.size];
+                        filename = strconcat(temp.path, "/", temp.dirent.d_name);
+                        restore(filename);
+                        free(filename);
+                        da_append(&dir_arr, temp);
+                        sort();
+                        refresh();
+                        break;
+
 
                 case 13:
                 case '\b': // backspace
@@ -374,15 +526,15 @@ mainloop()
                                               dir_arr.data[selected_row].path, selected_row + 1);
 
 
-                        print_files();
+                        refresh();
                         break;
 
                 case 's':
                         sort();
-                        print_files();
+                        refresh();
 
                 default:
-                        print_files();
+                        refresh();
                         report("Pressed unused char: %d", action);
                         break;
                 }
@@ -400,6 +552,7 @@ main(int argc, char *argv[])
 
         /* This is totally useless */
         if (flag_get("-E", "--external")) open_as_external = 1;
+        if (flag_get("-D", "--no-delete", "--dumb")) do_not_delete = 1;
 
         for (i = 1; i < argc; i++)
                 add_subfolder(argv[i], NULL, -1);
