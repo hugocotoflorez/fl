@@ -1,10 +1,12 @@
 #include <assert.h>
+#include <ctype.h>
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/limits.h>
 #include <regex.h>
 #include <stdarg.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -19,17 +21,19 @@
 
 #define UNDO_BACKUP_DIR "/tmp/fl-backup"
 
+// clang-format off
 /* Colors for specific entry types. "" is set to default */
 static const char *COLORS[] = {
-        [DT_BLK] = "", // This is a block device.
-        [DT_CHR] = "", // This is a character device.
-        [DT_DIR] = "\e[34m", // This is a directory.
-        [DT_FIFO] = "", // This is a named pipe (FIFO).
-        [DT_LNK] = "\e[36m", // This is a symbolic link.
-        [DT_REG] = "", // This is a regular file.
-        [DT_SOCK] = "", // This is a UNIX domain socket.
-        [DT_UNKNOWN] = "", // The file type could not be determined.
+        [DT_BLK] = "",          /* This is a block device. */
+        [DT_CHR] = "",          /* This is a character device. */
+        [DT_DIR] = "\e[34m",    /* This is a directory. */
+        [DT_FIFO] = "",         /* This is a named pipe (FIFO). */
+        [DT_LNK] = "\e[36m",    /* This is a symbolic link. */
+        [DT_REG] = "",          /* This is a regular file. */
+        [DT_SOCK] = "",         /* This is a UNIX domain socket. */
+        [DT_UNKNOWN] = "",      /* The file type could not be determined. */
 };
+// clang-format on
 
 
 struct extend_dirent {
@@ -475,12 +479,63 @@ __error_exit:
 }
 
 void
-read_line()
+print_matching_files(const char *restrict pattern)
+{
+        // int cflags = REG_EXTENDED /* Use posix extended regular expression */
+        //              | REG_ICASE /* Do not differentiate case */
+        //              | REG_NOSUB /* Report only overall success */
+        //              | REG_NEWLINE; /* Match-any-character don't match a newline */
+        // int eflags = REG_NOTBOL /* The match-beggining-of-line always fail */
+        //              | REG_NOTEOL /* The match-end-of-line always fails */
+        //              | REG_STARTEND; /* Something strange, see regcomp(3) */
+        int cflags = REG_EXTENDED | REG_ICASE | REG_NOSUB;
+        int eflags = 0;
+        regex_t regex;
+        regmatch_t pmatch[1];
+        size_t nmatch = 0;
+        char *input;
+        int i;
+        int errcode;
+        char buf[1024];
+        int offset;
+        int size;
+        if ((errcode = regcomp(&regex, pattern, cflags))) {
+                size = regerror(errcode, &regex, buf, sizeof buf);
+                report("regcomp error: %*s", size, buf);
+        }
+
+        for (offset = 1; offset <= dir_arr.size; offset++) {
+                i = (offset + selected_row) % dir_arr.size;
+                staticstrconcat(buf, sizeof(buf),
+                                dir_arr.data[i].path, "/",
+                                dir_arr.data[i].dirent.d_name);
+                if (regexec(&regex, buf, 1, pmatch, eflags) != REG_NOMATCH) {
+                        selected_row = i;
+                        break;
+                }
+        }
+
+        regfree(&regex);
+}
+
+#define TRIM_R(string)                                 \
+        do {                                           \
+                char *c = string + strlen(string) - 1; \
+                if (c < string) break;                 \
+                while (c >= string && isspace(*c))     \
+                        --c;                           \
+                c[1] = 0;                              \
+        } while (0)
+
+
+void
+search()
 {
         soft_disable_custom_mode();
-        char buf[1024];
-        fgets(buf, sizeof buf - 1, stdin);
-        report("Read: %s", buf);
+        char pattern[1024];
+        fgets(pattern, sizeof pattern - 1, stdin);
+        TRIM_R(pattern);
+        print_matching_files(pattern);
         enable_custom_mode();
 }
 
@@ -557,19 +612,18 @@ mainloop()
                         refresh();
                         break;
 
-                case 'v':
-                        printf("[dv mode] >> ");
+                case '/':
+                        printf("search >> ");
                         fflush(stdout);
-                        read_line();
+                        search();
+                        refresh();
                         break;
-
 
                 case 13:
                 case '\b': // backspace
                         if (!is_folder(dir_arr.data[selected_row].dirent)) {
                                 edit_file(dir_arr.data[selected_row].dirent.d_name, dir_arr.data[selected_row].path);
                         }
-
                         else if (is_folder_open(dir_arr.data[selected_row].dirent.d_name,
                                                 dir_arr.data[selected_row].path))
                                 remove_subfolder(dir_arr.data[selected_row].dirent.d_name,
@@ -577,8 +631,6 @@ mainloop()
                         else
                                 add_subfolder(dir_arr.data[selected_row].dirent.d_name,
                                               dir_arr.data[selected_row].path, selected_row + 1);
-
-
                         refresh();
                         break;
 
@@ -599,7 +651,6 @@ int
 main(int argc, char *argv[])
 {
         int i;
-
         flag_set(&argc, &argv);
 
         /* This is totally useless */
@@ -610,10 +661,8 @@ main(int argc, char *argv[])
                 report("Argument %d: %s", i, argv[i]);
                 add_subfolder(argv[i], NULL, -1);
         }
-
         if (argc == 1) add_subfolder(".", NULL, -1);
 
         mainloop();
-
         return 0;
 }
