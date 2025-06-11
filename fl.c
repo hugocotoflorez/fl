@@ -5,6 +5,7 @@
 #include <fcntl.h>
 #include <linux/limits.h>
 #include <regex.h>
+#include <semaphore.h>
 #include <stdarg.h>
 #include <stddef.h>
 #include <stdio.h>
@@ -21,19 +22,17 @@
 
 #define UNDO_BACKUP_DIR "/tmp/fl-backup"
 
-// clang-format off
 /* Colors for specific entry types. "" is set to default */
 static const char *COLORS[] = {
-        [DT_BLK] = "",          /* This is a block device. */
-        [DT_CHR] = "",          /* This is a character device. */
-        [DT_DIR] = "\e[34m",    /* This is a directory. */
-        [DT_FIFO] = "",         /* This is a named pipe (FIFO). */
-        [DT_LNK] = "\e[36m",    /* This is a symbolic link. */
-        [DT_REG] = "",          /* This is a regular file. */
-        [DT_SOCK] = "",         /* This is a UNIX domain socket. */
-        [DT_UNKNOWN] = "",      /* The file type could not be determined. */
+        [DT_BLK] = "",       /* This is a block device. */
+        [DT_CHR] = "",       /* This is a character device. */
+        [DT_DIR] = "\e[34m", /* This is a directory. */
+        [DT_FIFO] = "",      /* This is a named pipe (FIFO). */
+        [DT_LNK] = "\e[36m", /* This is a symbolic link. */
+        [DT_REG] = "",       /* This is a regular file. */
+        [DT_SOCK] = "",      /* This is a UNIX domain socket. */
+        [DT_UNKNOWN] = "",   /* The file type could not be determined. */
 };
-// clang-format on
 
 
 struct extend_dirent {
@@ -99,13 +98,13 @@ void
 enable_raw_mode()
 {
         static struct termios raw_opts;
-        static int init = 0;
-        if (!init) {
+        static int raw_mode_init = 0;
+        if (raw_mode_init == 0) {
                 tcgetattr(STDIN_FILENO, &origin_termios);
                 raw_opts = origin_termios;
                 cfmakeraw(&raw_opts);
                 raw_opts.c_oflag |= (OPOST | ONLCR); // '\n' -> '\r\n'
-                init = 1;
+                raw_mode_init = 1;
         }
         tcsetattr(STDIN_FILENO, TCSANOW, &raw_opts);
 }
@@ -220,7 +219,6 @@ edit_file(const char *path, const char *subpath)
         case -1:
                 error("Fork failed");
                 break;
-
         case 0:
                 if (!editor) editor = getenv("EDITOR");
                 if (!editor) {
@@ -296,6 +294,7 @@ is_folder_open(const char *path, const char *subpath)
 {
         char *p;
         int i;
+
         p = subpath ? strconcat(subpath, "/", path) :
                       strdup(path);
         for (i = 0; i < dir_arr.size; i++) {
@@ -334,9 +333,10 @@ int
 getkey()
 {
         char c;
-        if (read(STDIN_FILENO, &c, 1) != 1)
+        if (read(STDIN_FILENO, &c, 1) != 1) {
                 error("Error reading from stdin");
-
+                abort();
+        }
         switch (c) {
                 /* Handle special stuff here */
         default:
@@ -355,6 +355,31 @@ is_folder(struct dirent entry)
         default:
                 return 0;
         }
+}
+
+void
+change_dir()
+{
+        char path[1024];
+
+        staticstrconcat(path, 1024,
+                        dir_arr.data[selected_row].path, "/",
+                        dir_arr.data[selected_row].dirent.d_name);
+
+        if (!is_folder(dir_arr.data[selected_row].dirent)) {
+                report("Can not change dir to %s: it is not a folder", path);
+                return;
+        }
+        if (chdir(path)) {
+                error("Can not change dir to %s", path);
+                return;
+        }
+
+        selected_row = 0;
+        dir_arr.size = 0;
+        add_subfolder(".", NULL, -1);
+        /* Experimental: place selector at the mid */
+        selected_row = dir_arr.size / 2;
 }
 
 /* TODO: this is ugly as fuck. Noodle code :) */
@@ -432,7 +457,6 @@ store_remove(const char *filename)
                 return -1;
         }
 
-        /* I dont like how the following code looks like. TODO: refactoring */
         return 0;
 }
 
@@ -481,15 +505,14 @@ __error_exit:
 void
 print_matching_files(const char *restrict pattern)
 {
-        // int cflags = REG_EXTENDED /* Use posix extended regular expression */
-        //              | REG_ICASE /* Do not differentiate case */
-        //              | REG_NOSUB /* Report only overall success */
-        //              | REG_NEWLINE; /* Match-any-character don't match a newline */
-        // int eflags = REG_NOTBOL /* The match-beggining-of-line always fail */
-        //              | REG_NOTEOL /* The match-end-of-line always fails */
-        //              | REG_STARTEND; /* Something strange, see regcomp(3) */
-        int cflags = REG_EXTENDED | REG_ICASE | REG_NOSUB;
-        int eflags = 0;
+        int cflags = REG_EXTENDED    /* Use posix extended regular expression */
+                     | REG_ICASE     /* Do not differentiate case */
+                     | REG_NOSUB     /* Report only overall success */
+                     | REG_NEWLINE;  /* Match-any-character don't match a newline */
+        int eflags = 0               /* Set to 0 but perserve options for future purposes */
+                     | REG_NOTBOL    /* The match-beggining-of-line always fail */
+                     | REG_NOTEOL    /* The match-end-of-line always fails */
+                     | REG_STARTEND; /* Something strange, see regcomp(3) */
         regex_t regex;
         regmatch_t pmatch[1];
         size_t nmatch = 0;
@@ -499,11 +522,11 @@ print_matching_files(const char *restrict pattern)
         char buf[1024];
         int offset;
         int size;
+
         if ((errcode = regcomp(&regex, pattern, cflags))) {
                 size = regerror(errcode, &regex, buf, sizeof buf);
                 report("regcomp error: %*s", size, buf);
         }
-
         for (offset = 1; offset <= dir_arr.size; offset++) {
                 i = (offset + selected_row) % dir_arr.size;
                 staticstrconcat(buf, sizeof(buf),
@@ -514,7 +537,6 @@ print_matching_files(const char *restrict pattern)
                         break;
                 }
         }
-
         regfree(&regex);
 }
 
@@ -560,13 +582,11 @@ mainloop()
                         break;
 
                 case 'k':
-                        if (!selected_row--)
-                                selected_row = 0;
+                        if (!selected_row--) selected_row = 0;
                         refresh();
                         break;
                 case 'j':
-                        if (++selected_row >= dir_arr.size)
-                                selected_row--;
+                        if (++selected_row >= dir_arr.size) selected_row--;
                         refresh();
                         break;
 
@@ -612,6 +632,11 @@ mainloop()
                         refresh();
                         break;
 
+                case ' ':
+                        change_dir();
+                        refresh();
+                        break;
+
                 case '/':
                         printf("search >> ");
                         fflush(stdout);
@@ -623,9 +648,8 @@ mainloop()
                 case '\b': // backspace
                         if (!is_folder(dir_arr.data[selected_row].dirent)) {
                                 edit_file(dir_arr.data[selected_row].dirent.d_name, dir_arr.data[selected_row].path);
-                        }
-                        else if (is_folder_open(dir_arr.data[selected_row].dirent.d_name,
-                                                dir_arr.data[selected_row].path))
+                        } else if (is_folder_open(dir_arr.data[selected_row].dirent.d_name,
+                                                  dir_arr.data[selected_row].path))
                                 remove_subfolder(dir_arr.data[selected_row].dirent.d_name,
                                                  dir_arr.data[selected_row].path);
                         else
@@ -637,6 +661,7 @@ mainloop()
                 case 's':
                         sort();
                         refresh();
+                        break;
 
                 default:
                         refresh();
@@ -651,18 +676,32 @@ int
 main(int argc, char *argv[])
 {
         int i;
+        char *path;
         flag_set(&argc, &argv);
 
-        /* This is totally useless */
         if (flag_get("-E", "--external")) open_as_external = 1;
         if (flag_get("-D", "--no-delete", "--dumb")) do_not_delete = 1;
+        if (flag_get_value(&path, "-d", "--directory")) {
+                if (chdir(path)) {
+                        error("Can not change dir to %s", path);
+                        return -1;
+                }
+        }
+
+        if (!isatty(STDIN_FILENO)) {
+                report("Can't use fl, stdin doesn't refer to a terminal");
+                return -1;
+        }
 
         for (i = 1; i < argc; i++) {
-                report("Argument %d: %s", i, argv[i]);
                 add_subfolder(argv[i], NULL, -1);
         }
-        if (argc == 1) add_subfolder(".", NULL, -1);
+        add_subfolder(".", NULL, -1);
+
+        /* Experimental: place selector at the mid */
+        selected_row = dir_arr.size / 2;
 
         mainloop();
+
         return 0;
 }
