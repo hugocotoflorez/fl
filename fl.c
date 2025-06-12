@@ -187,8 +187,6 @@ sort()
         qsort(dir_arr.data, dir_arr.size, sizeof *dir_arr.data, sort_cmp);
 }
 
-#define amalloc(size) ({ __auto_type _ptr_ = malloc(size); assert(_ptr_); _ptr_; })
-
 void
 edit_file(const char *path, const char *subpath)
 {
