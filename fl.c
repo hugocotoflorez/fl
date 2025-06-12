@@ -6,11 +6,13 @@
 #include <linux/limits.h>
 #include <regex.h>
 #include <semaphore.h>
+#include <signal.h>
 #include <stdarg.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
@@ -46,8 +48,11 @@ typedef DA(struct extend_dirent) dirent_da;
 dirent_da dir_arr = { 0 };
 dirent_da deleted_dir_arr = { 0 };
 
+struct winsize wsize;
 struct termios origin_termios;
 int selected_row = 0;
+int woffset = 0;
+char pattern[1024] = { 0 };
 
 /* Program options */
 int open_as_external = 0;
@@ -316,14 +321,26 @@ print_file(struct extend_dirent entry)
 }
 
 void
+calc_wsize(int _)
+{
+        /* To be called on SIGWINCH */
+        ioctl(0, TIOCGWINSZ, &wsize);
+}
+
+void
 refresh()
 {
         int i;
-        /* Erase screen and place cursor at the top left corner */
+        /* I don't know how this work, just assume calcs are right */
+        int ws = (wsize.ws_row - 1 < dir_arr.size) ? wsize.ws_row - 1 :
+                                                     dir_arr.size;
+
+        if (selected_row < woffset) woffset = selected_row;
+        if (selected_row >= woffset + ws) woffset = selected_row - ws + 1;
+
         printf("\e[2J\e[H");
-        for (i = 0; i < dir_arr.size; i++) {
-                if (i == selected_row)
-                        printf("\e[7m");
+        for (i = woffset; i < ws + woffset; i++) {
+                if (i == selected_row) printf("\e[7m");
                 print_file(dir_arr.data[i]);
         }
         fflush(stdout);
@@ -358,6 +375,16 @@ is_folder(struct dirent entry)
 }
 
 void
+place_cursor_midwindow()
+{
+        selected_row = dir_arr.size / 2;
+        woffset = (wsize.ws_row >= dir_arr.size) ?
+                  0 :
+                  selected_row - wsize.ws_row / 2;
+}
+
+
+void
 change_dir()
 {
         char path[1024];
@@ -375,11 +402,9 @@ change_dir()
                 return;
         }
 
-        selected_row = 0;
         dir_arr.size = 0;
         add_subfolder(".", NULL, -1);
-        /* Experimental: place selector at the mid */
-        selected_row = dir_arr.size / 2;
+        place_cursor_midwindow();
 }
 
 /* TODO: this is ugly as fuck. Noodle code :) */
@@ -503,16 +528,10 @@ __error_exit:
 }
 
 void
-print_matching_files(const char *restrict pattern)
+select_matching_file(const char *restrict pattern)
 {
-        int cflags = REG_EXTENDED    /* Use posix extended regular expression */
-                     | REG_ICASE     /* Do not differentiate case */
-                     | REG_NOSUB     /* Report only overall success */
-                     | REG_NEWLINE;  /* Match-any-character don't match a newline */
-        int eflags = 0               /* Set to 0 but perserve options for future purposes */
-                     | REG_NOTBOL    /* The match-beggining-of-line always fail */
-                     | REG_NOTEOL    /* The match-end-of-line always fails */
-                     | REG_STARTEND; /* Something strange, see regcomp(3) */
+        int cflags = REG_EXTENDED | REG_ICASE | REG_NEWLINE;
+        int eflags = 0;
         regex_t regex;
         regmatch_t pmatch[1];
         size_t nmatch = 0;
@@ -523,13 +542,15 @@ print_matching_files(const char *restrict pattern)
         int offset;
         int size;
 
+        if (pattern[0] == 0) return;
+
         if ((errcode = regcomp(&regex, pattern, cflags))) {
                 size = regerror(errcode, &regex, buf, sizeof buf);
                 report("regcomp error: %*s", size, buf);
         }
-        for (offset = 1; offset <= dir_arr.size; offset++) {
+        for (offset = 1; offset < dir_arr.size; offset++) {
                 i = (offset + selected_row) % dir_arr.size;
-                staticstrconcat(buf, sizeof(buf),
+                staticstrconcat(buf, sizeof(buf) - 1,
                                 dir_arr.data[i].path, "/",
                                 dir_arr.data[i].dirent.d_name);
                 if (regexec(&regex, buf, 1, pmatch, eflags) != REG_NOMATCH) {
@@ -554,11 +575,10 @@ void
 search()
 {
         soft_disable_custom_mode();
-        char pattern[1024];
         fgets(pattern, sizeof pattern - 1, stdin);
         TRIM_R(pattern);
-        print_matching_files(pattern);
         enable_custom_mode();
+        select_matching_file(pattern);
 }
 
 void
@@ -643,6 +663,10 @@ mainloop()
                         search();
                         refresh();
                         break;
+                case 'n':
+                        select_matching_file(pattern);
+                        refresh();
+                        break;
 
                 case 13:
                 case '\b': // backspace
@@ -660,6 +684,15 @@ mainloop()
 
                 case 's':
                         sort();
+                        refresh();
+                        break;
+
+                case 'g':
+                        selected_row = 0;
+                        refresh();
+                        break;
+                case 'G':
+                        selected_row = dir_arr.size - 1;
                         refresh();
                         break;
 
@@ -693,13 +726,19 @@ main(int argc, char *argv[])
                 return -1;
         }
 
+        if (signal(SIGWINCH, calc_wsize) == SIG_ERR) {
+                report("Can't set window resize handler");
+                return -1;
+        }
+
+        calc_wsize(0);
+
         for (i = 1; i < argc; i++) {
                 add_subfolder(argv[i], NULL, -1);
         }
         add_subfolder(".", NULL, -1);
 
-        /* Experimental: place selector at the mid */
-        selected_row = dir_arr.size / 2;
+        place_cursor_midwindow();
 
         mainloop();
 

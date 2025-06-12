@@ -23,6 +23,8 @@ make install
 - `d`: Delete selected file.
 - `r`: Restore last file deleted.
 - `space`: Change working directory to selected entry.
+- `/`: Search for a pattern and select first occurence.
+- `n`: Select next occurence.
 
 ## REFERENCES
 - https://gist.github.com/fnky/458719343aabd01cfb17a3a4f7296797
@@ -47,8 +49,6 @@ set in source code, under the name of UNDO_BACKUP_DIR.
 9. Restore deleted files.
 10. Change working directory.
 11. Place selector in the middle (less movement is required).
+12. Improve mid cursor positioning.
+13. Moving window for large directories.
 
-## TODO
-It is needed to implement a moving window if entry count is greater than
-terminal rows. It should not be dificult as any part of the rogram rely on
-window other than refresh.
