@@ -55,7 +55,12 @@ int woffset = 0;
 char pattern[1024] = { 0 };
 
 /* Program options */
+#ifdef EXTERNAL
+int open_as_external = 1;
+#else
 int open_as_external = 0;
+#endif
+
 int do_not_delete = 0;
 
 
@@ -120,19 +125,24 @@ disable_raw_mode()
         tcsetattr(STDIN_FILENO, TCSANOW, &origin_termios);
 }
 
-/* If this is defined as a function, the alternative buffer does not work.
- * So, it is defined as a macro :/ */
 enum {
         CUSTOM_MODE_SET,
         CUSTOM_MODE_UNSET,
 } custom_mode_status = CUSTOM_MODE_UNSET;
 
-#define disable_custom_mode()                                         \
-        if (custom_mode_status == CUSTOM_MODE_SET) {                  \
-                /* disable alternative buffer */ printf("\e[?1049l"); \
-                /* make cursor visible        */ printf("\e[?25h");   \
-                disable_raw_mode();                                   \
-                custom_mode_status = CUSTOM_MODE_UNSET;               \
+// #define DISABLE "\e[?1049l"
+// #define ENABLE "\e[?1049h"
+#define DISABLE "\e[?47l"
+#define ENABLE "\e[?47h"
+
+/* If this is defined as a function, the alternative buffer does not work.
+ * So, it is defined as a macro :/ */
+#define disable_custom_mode()                                       \
+        if (custom_mode_status == CUSTOM_MODE_SET) {                \
+                /* disable alternative buffer */ printf(DISABLE);   \
+                /* make cursor visible        */ printf("\e[?25h"); \
+                disable_raw_mode();                                 \
+                custom_mode_status = CUSTOM_MODE_UNSET;             \
         }
 
 /* Like disable_custom_mode but does not disable alternative buffer */
@@ -147,7 +157,7 @@ enum {
         if (custom_mode_status == CUSTOM_MODE_UNSET) {                \
                 enable_raw_mode();                                    \
                 /* make cursor invisible      */ printf("\e[?25l");   \
-                /* enable alternative buffer  */ printf("\e[?1049h"); \
+                /* enable alternative buffer  */ printf(ENABLE);      \
                 /* clear screen               */ printf("\e[H\e[2J"); \
                 custom_mode_status = CUSTOM_MODE_SET;                 \
         }
@@ -444,7 +454,7 @@ store_remove(const char *filename)
         char backup_filename[1024];
         ssize_t n;
 
-        strconcat(backup_filename, 1024, UNDO_BACKUP_DIR, "/", filename);
+        staticstrconcat(backup_filename, 1024, UNDO_BACKUP_DIR, "/", filename);
         if (create_filename_path_if_not_exists(backup_filename)) {
                 error("Can not create path for file: `%s`", backup_filename);
                 return -1;
@@ -629,12 +639,10 @@ mainloop()
                         if (do_not_delete) break;
                         temp = dir_arr.data[selected_row];
                         filename = strconcat(temp.path, "/", temp.dirent.d_name);
-                        if (store_remove(filename)) {
-                                break;
-                        }
+                        if (store_remove(filename)) break;
+                        free(filename);
                         da_append(&deleted_dir_arr, temp);
                         da_remove(&dir_arr, selected_row);
-                        free(filename);
                         if (selected_row == dir_arr.size) --selected_row;
                         refresh();
                         break;
@@ -711,6 +719,7 @@ main(int argc, char *argv[])
         flag_set(&argc, &argv);
 
         if (flag_get("-E", "--external")) open_as_external = 1;
+        if (flag_get("-I", "--internal")) open_as_external = 0;
         if (flag_get("-D", "--no-delete", "--dumb")) do_not_delete = 1;
         if (flag_get_value(&path, "-d", "--directory")) {
                 if (chdir(path)) {
@@ -739,6 +748,9 @@ main(int argc, char *argv[])
         place_cursor_midwindow();
 
         mainloop();
+
+        char cwd[1024];
+        printf("%s\n", getcwd(cwd, 1024));
 
         return 0;
 }

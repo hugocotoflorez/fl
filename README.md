@@ -25,6 +25,7 @@ make install
 - `space`: Change working directory to selected entry.
 - `/`: Search for a pattern and select first occurence.
 - `n`: Select next occurence.
+- g/G: Go to the first/last entry.
 
 ## REFERENCES
 - https://gist.github.com/fnky/458719343aabd01cfb17a3a4f7296797
