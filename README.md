@@ -62,4 +62,5 @@ is set in source code, under the name of UNDO_BACKUP_DIR.
 13. Moving window for large directories.
 14. Custom (and unique) log file path.
 15. Stdout always refer to the tty.
+16. Detach external open command from terminal
 

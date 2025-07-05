@@ -243,10 +243,17 @@ edit_file(const char *path, const char *subpath)
                         error("Fork failed");
                         return;
                 case 0:
-                        execvp("xdg-open", (char *const[]) { "xdg-open", p, NULL });
-                        error("Execv failed");
-                        report("  at: execv(\"xdg-open\", (char *const[]) { \"xdg-open\", %s, NULL });", p);
-                        abort();
+                        switch (fork()) {
+                        case -1:
+                                error("Fork failed");
+                                return;
+                        case 0:
+                                /* Doing this dettach the process from the terminal */
+                                execvp("xdg-open", (char *const[]) { "xdg-open", p, NULL });
+                                abort();
+                        default:
+                                exit(0);
+                        }
                 default:
                         return;
                 }
