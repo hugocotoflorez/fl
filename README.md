@@ -34,6 +34,10 @@ that uses posix standard.
 ## REFERENCES
 - https://gist.github.com/fnky/458719343aabd01cfb17a3a4f7296797
 
+## Change dir on exit
+It is needed to map `fl` to `cd $(fl)` in your shell, as changing dir depends
+on the shell and can not be done directly from an external program.
+
 ## HOW DELETION WORK
 1. File is copied to /tmp, so it is removed on system power off.
 2. If undoing, file is copied from /tmp backup to current directory.
