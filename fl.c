@@ -22,6 +22,7 @@
 #include "flag/flag.h"
 #include "frog/frog.h"
 
+#define LOG_FILE ".local/state/fl/fl.log"
 #define UNDO_BACKUP_DIR "/tmp/fl-backup"
 
 /* Colors for specific entry types. "" is set to default */
@@ -53,6 +54,7 @@ struct termios origin_termios;
 int selected_row = 0;
 int woffset = 0;
 char pattern[1024] = { 0 };
+int stdout_fileno;
 
 /* Program options */
 #ifdef EXTERNAL
@@ -130,45 +132,69 @@ enum {
         CUSTOM_MODE_UNSET,
 } custom_mode_status = CUSTOM_MODE_UNSET;
 
-// #define DISABLE "\e[?1049l"
-// #define ENABLE "\e[?1049h"
-#define DISABLE "\e[?47l"
-#define ENABLE "\e[?47h"
+// #define DISABLE "\e[?47l"
+// #define ENABLE "\e[?47h"
+#define DISABLE "\e[?1049l"
+#define ENABLE "\e[?1049h"
+// #define DISABLE ""
+// #define ENABLE ""
 
 /* If this is defined as a function, the alternative buffer does not work.
  * So, it is defined as a macro :/ */
-#define disable_custom_mode()                                       \
-        if (custom_mode_status == CUSTOM_MODE_SET) {                \
-                /* disable alternative buffer */ printf(DISABLE);   \
-                /* make cursor visible        */ printf("\e[?25h"); \
-                disable_raw_mode();                                 \
-                custom_mode_status = CUSTOM_MODE_UNSET;             \
+#define disable_custom_mode()                           \
+        if (custom_mode_status == CUSTOM_MODE_SET) {    \
+                dprintf(stdout_fileno, DISABLE);        \
+                dprintf(stdout_fileno, "\e[?25h");      \
+                disable_raw_mode();                     \
+                custom_mode_status = CUSTOM_MODE_UNSET; \
         }
 
 /* Like disable_custom_mode but does not disable alternative buffer */
-#define soft_disable_custom_mode()                                  \
-        if (custom_mode_status == CUSTOM_MODE_SET) {                \
-                /* make cursor visible        */ printf("\e[?25h"); \
-                disable_raw_mode();                                 \
-                custom_mode_status = CUSTOM_MODE_UNSET;             \
+#define soft_disable_custom_mode()                      \
+        if (custom_mode_status == CUSTOM_MODE_SET) {    \
+                dprintf(stdout_fileno, "\e[?25h");      \
+                disable_raw_mode();                     \
+                custom_mode_status = CUSTOM_MODE_UNSET; \
         }
 
-#define enable_custom_mode()                                          \
-        if (custom_mode_status == CUSTOM_MODE_UNSET) {                \
-                enable_raw_mode();                                    \
-                /* make cursor invisible      */ printf("\e[?25l");   \
-                /* enable alternative buffer  */ printf(ENABLE);      \
-                /* clear screen               */ printf("\e[H\e[2J"); \
-                custom_mode_status = CUSTOM_MODE_SET;                 \
+#define enable_custom_mode()                           \
+        if (custom_mode_status == CUSTOM_MODE_UNSET) { \
+                enable_raw_mode();                     \
+                dprintf(stdout_fileno, "\e[?25l");     \
+                dprintf(stdout_fileno, ENABLE);        \
+                dprintf(stdout_fileno, "\e[2J\e[H");   \
+                custom_mode_status = CUSTOM_MODE_SET;  \
         }
 
 /* Coments in the code above are written before the actual code to be able to
  * use it inside the macro, don't judge me, please. */
 
+int create_filename_path_if_not_exists(const char *path);
+
 void
 report(const char *restrict format, ...)
 {
-        FILE *file = fopen("log.txt", "a");
+        char buffer[1024 * 1024];
+        int fd_in, fd_out;
+        char backup_filename[1024];
+        ssize_t n;
+        static char *home = NULL;
+
+        if (home == NULL) {
+                home = getenv("HOME");
+                if (home)
+                        home = strdup(home);
+                else
+                        printf("Can not get env `HOME`");
+        }
+
+        staticstrconcat(backup_filename, 1024, home ?: ".", "/", LOG_FILE);
+        if (create_filename_path_if_not_exists(backup_filename)) {
+                printf("Can not create path for file: `%s`", backup_filename);
+                return;
+        }
+
+        FILE *file = fopen(backup_filename, "a");
         va_list ap;
         va_start(ap, format);
         vfprintf(file, format, ap);
@@ -324,8 +350,8 @@ print_file(struct extend_dirent entry)
 {
         char *path = entry.path;
         if (!memcmp(path, "./", 2)) path += 2; // remove the ugly ./ prefix
-        if (strcmp(path, ".")) printf("%s/", path);
-        printf("%s%s\e[0m\n", COLORS[entry.dirent.d_type], entry.dirent.d_name);
+        if (strcmp(path, ".")) dprintf(stdout_fileno, "%s/", path);
+        dprintf(stdout_fileno, "%s%s\e[0m\n", COLORS[entry.dirent.d_type], entry.dirent.d_name);
 }
 
 void
@@ -346,12 +372,12 @@ refresh()
         if (selected_row < woffset) woffset = selected_row;
         if (selected_row >= woffset + ws) woffset = selected_row - ws + 1;
 
-        printf("\e[2J\e[H");
+        dprintf(stdout_fileno, "\e[2J\e[H");
         for (i = woffset; i < ws + woffset; i++) {
-                if (i == selected_row) printf("\e[7m");
+                if (i == selected_row) dprintf(stdout_fileno, "\e[7m");
                 print_file(dir_arr.data[i]);
         }
-        fflush(stdout);
+        fsync(stdout_fileno);
 }
 
 int
@@ -664,8 +690,8 @@ mainloop()
                         break;
 
                 case '/':
-                        printf("search >> ");
-                        fflush(stdout);
+                        dprintf(stdout_fileno, "search >> ");
+                        fsync(stdout_fileno);
                         search();
                         refresh();
                         break;
@@ -732,6 +758,14 @@ main(int argc, char *argv[])
                 report("Can't use fl, stdin doesn't refer to a terminal");
                 return -1;
         }
+
+        stdout_fileno = open("/dev/tty", O_WRONLY);
+
+        if (!stdout_fileno) {
+                report("Can't use fl, stdout doesn't refer to a terminal:%s", strerror(errno));
+                return -1;
+        }
+
 
         if (signal(SIGWINCH, calc_wsize) == SIG_ERR) {
                 report("Can't set window resize handler");

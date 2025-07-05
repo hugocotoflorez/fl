@@ -4,17 +4,21 @@
 1. Compile it with some C compiler: `cc fl.c -o fl`
 2. Execute it: `./fl [OPTIONS]`
 
-### makefile installation
-There is a makefile for compiling and installing it. It is needed to have
-`~/.local/bin` in path.
+## INSTALLATION
 ```sh
-make install
+git clone --recursive https://github.com/hugocotoflorez/fl
+cd fl && make install
 ```
 
 ### OPTIONS
 - `-E`,  `--external`: Open files using xdg-open instead of `$EDITOR`.
+- `-I`,  `--internal`: Open files using `$EDITOR`. This is the default.
 - `-D`, `--no-delete`, `--dumb`: Do not delete files if pressing `d`.
 - `-d`, `--directory`: Change working directory for program execution.
+
+## STANDARD
+Only official support for my machine. Should work on linux distros
+that uses posix standard.
 
 ## KEYBINDS
 - `k`, `j`: Move selector up and down.
@@ -35,8 +39,8 @@ make install
 2. If undoing, file is copied from /tmp backup to current directory.
 3. If you delete a file by error, it is in /tmp.
 
-Undo list is not perserved between program executions. Note that backup path is
-set in source code, under the name of UNDO_BACKUP_DIR.
+Undo list is not perserved between program executions. Note that backup path
+is set in source code, under the name of UNDO_BACKUP_DIR.
 
 ## Things that (may) work
 1. Select a single entry.
@@ -52,4 +56,6 @@ set in source code, under the name of UNDO_BACKUP_DIR.
 11. Place selector in the middle (less movement is required).
 12. Improve mid cursor positioning.
 13. Moving window for large directories.
+14. Custom (and unique) log file path.
+15. Stdout always refer to the tty.
 
