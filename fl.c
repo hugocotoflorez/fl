@@ -72,7 +72,7 @@ __strconcat(const char *s1, ...)
         va_list ap;
         char *result;
         char *current;
-        int size;
+        int size = 0;
         /* Count total size, to avoid realloc */
         va_start(ap, s1);
         while ((current = va_arg(ap, char *)))
