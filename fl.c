@@ -22,7 +22,7 @@
 #include "flag/flag.h"
 #include "frog/frog.h"
 
-#define LOG_FILE ".local/state/fl/fl.log"
+#define LOG_FILE ".local/state/fl/fl.log" /* Start at HOME */
 #define UNDO_BACKUP_DIR "/tmp/fl-backup"
 
 /* Colors for specific entry types. "" is set to default */
@@ -36,7 +36,6 @@ static const char *COLORS[] = {
         [DT_SOCK] = "",      /* This is a UNIX domain socket. */
         [DT_UNKNOWN] = "",   /* The file type could not be determined. */
 };
-
 
 struct extend_dirent {
         struct dirent dirent;
@@ -104,7 +103,8 @@ __staticstrconcat(char *buf, int size, ...)
         va_end(ap);
         return buf;
 }
-#define staticstrconcat(buf, size, ...) __staticstrconcat(buf, size, ##__VA_ARGS__, NULL)
+#define staticstrconcat(buf, size, ...) \
+        __staticstrconcat(buf, size, ##__VA_ARGS__, NULL)
 
 void
 enable_raw_mode()
@@ -244,13 +244,12 @@ edit_file(const char *path, const char *subpath)
                         return;
                 case 0:
                         setsid();
-                        /* Parent
-                         *   > child
-                         *       > child -> exec
-                         * Doing this it dettach the process from the terminal */
-                        execvp("xdg-open", (char *const[]) { "xdg-open", p, NULL });
+                        execvp("xdg-open",
+                               (char *const[]) { "xdg-open", p, NULL });
                         error("Execv failed");
-                        report("  at: execv(\"xdg-open\", (char *const[]) { \"xdg-open\", %s, NULL });", p);
+                        report("  at: execv(\"xdg-open\", (char *const[]) "
+                               "{ \"xdg-open\", %s, NULL });",
+                               p);
                         abort();
                 default:
                         return;
@@ -274,7 +273,8 @@ edit_file(const char *path, const char *subpath)
                 }
                 execvp(editor, (char *const[]) { editor, p, NULL });
                 error("Execv failed");
-                report("  at: execv(%s, (char *const[]) { %s, %s, NULL });", editor, p, editor);
+                report("  at: execv(%s, (char *const[]) { %s, %s, NULL });",
+                       editor, p, editor);
                 abort();
 
         default:
@@ -305,7 +305,7 @@ add_subfolder(const char *path, const char *subpath, int at)
         if (at < 0 || at > dir_arr.size) at = dir_arr.size;
 
         while ((entry = readdir(dir))) {
-                if (!strcmp(entry->d_name, ".")) continue; // do not add "." to files
+                if (!strcmp(entry->d_name, ".")) continue; // do not add "^./"
                 edirent.dirent = *entry;
                 strcpy(edirent.path, p);
                 da_insert(&dir_arr, edirent, at);
@@ -356,7 +356,8 @@ print_file(struct extend_dirent entry)
         char *path = entry.path;
         if (!memcmp(path, "./", 2)) path += 2; // remove the ugly ./ prefix
         if (strcmp(path, ".")) dprintf(stdout_fileno, "%s/", path);
-        dprintf(stdout_fileno, "%s%s\e[0m\n", COLORS[entry.dirent.d_type], entry.dirent.d_name);
+        dprintf(stdout_fileno, "%s%s\e[0m\n",
+                COLORS[entry.dirent.d_type], entry.dirent.d_name);
 }
 
 void
@@ -652,7 +653,8 @@ mainloop()
                 case 'K':
                         if (selected_row == 0) break;
                         temp = dir_arr.data[selected_row];
-                        dir_arr.data[selected_row] = dir_arr.data[selected_row - 1];
+                        dir_arr.data[selected_row] =
+                        dir_arr.data[selected_row - 1];
                         dir_arr.data[selected_row - 1] = temp;
                         --selected_row;
                         refresh();
@@ -660,7 +662,8 @@ mainloop()
                 case 'J':
                         if (selected_row >= dir_arr.size - 1) break;
                         temp = dir_arr.data[selected_row];
-                        dir_arr.data[selected_row] = dir_arr.data[selected_row + 1];
+                        dir_arr.data[selected_row] =
+                        dir_arr.data[selected_row + 1];
                         dir_arr.data[selected_row + 1] = temp;
                         ++selected_row;
                         refresh();
@@ -747,8 +750,9 @@ main(int argc, char *argv[])
 {
         int i;
         char *path;
-        flag_set(&argc, &argv);
+        char cwd[1024];
 
+        flag_set(&argc, &argv);
         if (flag_get("-E", "--external")) open_as_external = 1;
         if (flag_get("-I", "--internal")) open_as_external = 0;
         if (flag_get("-D", "--no-delete", "--dumb")) do_not_delete = 1;
@@ -767,28 +771,24 @@ main(int argc, char *argv[])
         stdout_fileno = open("/dev/tty", O_WRONLY);
 
         if (!stdout_fileno) {
-                report("Can't use fl, stdout doesn't refer to a terminal:%s", strerror(errno));
+                report("Can't use fl, stdout doesn't refer to a terminal:%s",
+                       strerror(errno));
                 return -1;
         }
-
 
         if (signal(SIGWINCH, calc_wsize) == SIG_ERR) {
                 report("Can't set window resize handler");
                 return -1;
         }
 
-        calc_wsize(0);
-
         for (i = 1; i < argc; i++) {
                 add_subfolder(argv[i], NULL, -1);
         }
         add_subfolder(".", NULL, -1);
 
+        calc_wsize(0);
         place_cursor_midwindow();
-
         mainloop();
-
-        char cwd[1024];
         printf("%s\n", getcwd(cwd, 1024));
 
         return 0;
