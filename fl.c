@@ -223,6 +223,12 @@ sort()
         qsort(dir_arr.data, dir_arr.size, sizeof *dir_arr.data, sort_cmp);
 }
 
+int
+endwith(const char *str, const char *sufix)
+{
+        return strcmp(str + strlen(str) - strlen(sufix), sufix) == 0;
+}
+
 void
 edit_file(const char *path, const char *subpath)
 {
@@ -237,7 +243,9 @@ edit_file(const char *path, const char *subpath)
                 abort();
         }
 
-        if (open_as_external) {
+        /* Todo: filter by extension, as some files should be opened allways
+         * externally. */
+        if (open_as_external || endwith(p, ".pdf")) {
                 switch (fork()) {
                 case -1:
                         error("Fork failed");
